@@ -1,0 +1,42 @@
+{
+  "name": "@iooe/ranoberf-sdk",
+  "version": "0.1.0",
+  "description": "Production-oriented TypeScript SDK for public RanobeRF catalog, books and chapters",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.ru.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run clean && tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "keywords": [
+    "ranoberf",
+    "ranobe",
+    "light-novel",
+    "sdk",
+    "typescript"
+  ],
+  "author": "iooe",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
