@@ -11,35 +11,31 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Probe public source contracts
+      - name: Probe RanobeRF public API contract
         shell: bash
         run: |
           python3 - <<'PY'
-          import html
           import json
           import re
           import urllib.error
           import urllib.parse
           import urllib.request
 
-          UA = "Mozilla/5.0 (compatible; source-contract-probe/1.2)"
+          UA = "Mozilla/5.0 (compatible; ranoberf-sdk-contract-probe/1.0)"
 
-          def fetch(url, accept="application/json,text/html;q=0.9,*/*;q=0.8", extra=None):
-              headers = {
+          def fetch(url, accept="application/json,text/html;q=0.9,*/*;q=0.8"):
+              request = urllib.request.Request(url, headers={
                   "User-Agent": UA,
                   "Accept": accept,
                   "Referer": urllib.parse.urljoin(url, "/"),
-              }
-              headers.update(extra or {})
-              req = urllib.request.Request(url, headers=headers)
+              })
               try:
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      body = response.read(3_000_000)
-                      return response.status, response.headers.get("content-type", ""), response.geturl(), body
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return response.status, response.headers.get("content-type", ""), response.geturl(), response.read(4_000_000)
               except urllib.error.HTTPError as error:
-                  return error.code, error.headers.get("content-type", ""), error.geturl(), error.read(300_000)
+                  return error.code, error.headers.get("content-type", ""), error.geturl(), error.read(500_000)
               except Exception as error:
                   return 0, type(error).__name__, url, str(error).encode()
 
@@ -48,9 +44,9 @@ jobs:
                   return type(value).__name__
               if isinstance(value, dict):
                   result = {}
-                  for key, child in list(value.items())[:100]:
+                  for key, child in list(value.items())[:120]:
                       if isinstance(child, str):
-                          result[key] = {"type": "str", "length": len(child), "sample": child[:120]}
+                          result[key] = {"type": "str", "length": len(child), "sample": child[:160]}
                       else:
                           result[key] = shape(child, depth + 1)
                   return result
@@ -58,74 +54,69 @@ jobs:
                   return {"type": "list", "length": len(value), "sample": shape(value[0], depth + 1) if value else None}
               return value
 
-          def probe_json(label, url, extra=None):
-              status, content_type, final_url, body = fetch(url, "application/json,text/javascript,*/*;q=0.8", extra)
+          def probe(label, url):
+              status, content_type, final_url, body = fetch(url)
               print(f"\n### {label}\nstatus={status} content_type={content_type} final={final_url} bytes={len(body)}")
               try:
                   payload = json.loads(body.decode("utf-8-sig"))
               except Exception:
-                  print(body[:1200].decode("utf-8", "replace"))
+                  print(body[:1600].decode("utf-8", "replace"))
                   return None
-              print(json.dumps(shape(payload), ensure_ascii=False, indent=2)[:40000])
+              print(json.dumps(shape(payload), ensure_ascii=False, indent=2)[:50000])
               return payload
 
-          for base in ["https://www.xn--80ac9aeh6f.xn--p1ai", "https://xn--80ac9aeh6f.xn--p1ai"]:
-              probe_json(f"ranoberf book {base}", f"{base}/api/v2/books/povelitely")
-              probe_json(f"ranoberf chapters {base}", f"{base}/api/v2/books/povelitely/chapters")
-              probe_json(f"ranoberf catalog {base}", f"{base}/api/v2/books?page=1&limit=3")
+          base = "https://xn--80acm4afj.xn--p1ai"
+          status, content_type, final_url, body = fetch(base, "text/html,*/*;q=0.8")
+          page = body.decode("utf-8", "replace")
+          print(f"\n### home\nstatus={status} content_type={content_type} final={final_url} bytes={len(body)}")
+          print("scripts=", json.dumps(re.findall(r'<script[^>]+src=[\"\']([^\"\']+)', page, re.I)[:100], ensure_ascii=False))
+          print("book_links=", json.dumps(sorted(set(re.findall(r'href=[\"\']/([^\"\'/?#]+)/?[\"\']', page, re.I)))[:100], ensure_ascii=False))
 
-          def clean(value, limit=6000):
-              value = re.sub(r'<script\b[^>]*>[\s\S]*?</script\s*>', '', value, flags=re.I)
-              return re.sub(r'\s+', ' ', value)[:limit]
+          aliases = ["povelitely"]
+          aliases.extend(sorted(set(re.findall(r'href=[\"\']/([^\"\'/?#]+)/?[\"\']', page, re.I))))
+          aliases = [item for item in dict.fromkeys(aliases) if item not in {"api", "books", "catalog", "login", "register"}][:25]
 
-          book_url = "https://tl.rulate.ru/book/201009"
-          status, content_type, final_url, body = fetch(book_url, "text/html,*/*;q=0.8")
-          text = body.decode("utf-8", "replace")
-          print(f"\n### rulate book status={status} bytes={len(body)}")
-          for label, pattern in [
-              ("info", r'<div[^>]+id=["\']Info["\'][^>]*>[\s\S]{0,35000}'),
-              ("description", r'<[^>]+class=["\'][^"\']*book-description[^"\']*["\'][^>]*>[\s\S]{0,10000}'),
-              ("chapter-row", r'<tr[^>]+class=["\'][^"\']*chapter_row[^"\']*["\'][^>]*>[\s\S]*?</tr>'),
+          working_alias = None
+          for alias in aliases:
+              payload = probe(f"book {alias}", f"{base}/api/v2/books/{urllib.parse.quote(alias)}")
+              if isinstance(payload, dict) and any(key in payload for key in ("title", "fullTitle", "alias", "images")):
+                  working_alias = alias
+                  break
+
+          if working_alias:
+              chapters = probe("chapters", f"{base}/api/v2/books/{urllib.parse.quote(working_alias)}/chapters")
+              items = []
+              if isinstance(chapters, dict):
+                  items = chapters.get("items") or chapters.get("data") or chapters.get("chapters") or []
+              elif isinstance(chapters, list):
+                  items = chapters
+              if items:
+                  free = next((item for item in items if isinstance(item, dict) and (item.get("hasUserPaid") or item.get("availabilityStatus") == "free")), items[0])
+                  slug = free.get("slug") if isinstance(free, dict) else None
+                  if slug:
+                      probe("chapter", f"{base}/api/v2/books/{urllib.parse.quote(working_alias)}/chapters/{urllib.parse.quote(str(slug))}")
+
+          for path in [
+              "/api/v2/books",
+              "/api/v2/books?page=1",
+              "/api/v2/books?page=1&limit=3",
+              "/api/v2/catalog",
+              "/api/v2/catalog/books?page=1&limit=3",
+              "/api/v2/search?query=маг",
+              "/api/v2/books/search?query=маг",
+              "/openapi.json",
+              "/api/openapi.json",
+              "/swagger.json",
           ]:
-              match = re.search(pattern, text, re.I)
-              print(f"\n-- {label} --\n{clean(match.group(0)) if match else 'not found'}")
+              probe(f"candidate {path}", base + path)
 
-          chapter_id = "25027713"
-          ready_url = f"https://tl.rulate.ru/book/201009/{chapter_id}/ready_new"
-          ajax_url = f"https://tl.rulate.ru/book/201009/{chapter_id}/readyajax?is_new=true"
-          xhr_headers = {
-              "X-Requested-With": "XMLHttpRequest",
-              "Referer": ready_url,
-          }
-          probe_json("rulate chapter readyajax XHR", ajax_url, xhr_headers)
-          probe_json("rulate chapter readyajax plain", ajax_url)
-
-          status, content_type, final_url, body = fetch(ready_url, "text/html,*/*;q=0.8")
-          chapter_html = body.decode("utf-8", "replace")
-          print(f"\n### rulate ready page status={status} bytes={len(body)} final={final_url}")
-          for label, pattern in [
-              ("content", r'<div[^>]+class=["\'][^"\']*content-text[^"\']*["\'][^>]*>[\s\S]{0,12000}'),
-              ("translator context", r'.{0,1000}(?:Переводчик|Перевод от|users/|team)[\s\S]{0,3000}'),
-              ("chapter header", r'<h1[^>]*>[\s\S]*?</h1>'),
-          ]:
-              match = re.search(pattern, chapter_html, re.I)
-              print(f"\n-- {label} --\n{clean(match.group(0)) if match else 'not found'}")
-
-          members_url = "https://tl.rulate.ru/book/201009/members"
-          status, content_type, final_url, body = fetch(members_url, "text/html,*/*;q=0.8")
-          members_html = body.decode("utf-8", "replace")
-          print(f"\n### rulate members status={status} bytes={len(body)}")
-          match = re.search(r'<[^>]+class=["\'][^"\']*(?:members|table)[^"\']*["\'][^>]*>[\s\S]{0,15000}', members_html, re.I)
-          print(clean(match.group(0)) if match else clean(members_html, 10000))
-
-          status, content_type, final_url, body = fetch("https://tl.rulate.ru/search", "text/html,*/*;q=0.8")
-          search_html = body.decode("utf-8", "replace")
-          print(f"\n### rulate search status={status} bytes={len(body)}")
-          for label, pattern in [
-              ("advanced form", r'<form[^>]+action=["\']/search["\'][^>]*class=["\'][^"\']*(?:vertical|search)[^"\']*["\'][^>]*>[\s\S]*?</form>'),
-              ("search row", r'<li><div class=["\']th["\']>[\s\S]{0,7000}'),
-              ("pager", r'<div[^>]+class=["\'][^"\']*books-pagination[^"\']*["\'][^>]*>[\s\S]{0,2500}'),
-          ]:
-              match = re.search(pattern, search_html, re.I)
-              print(f"\n-- {label} --\n{clean(match.group(0)) if match else 'not found'}")
+          scripts = re.findall(r'<script[^>]+src=[\"\']([^\"\']+)', page, re.I)
+          for source in scripts[:40]:
+              url = urllib.parse.urljoin(final_url, source)
+              status, content_type, resolved, body = fetch(url, "application/javascript,text/javascript,*/*;q=0.8")
+              text = body.decode("utf-8", "replace")
+              paths = sorted(set(re.findall(r'[\"\'](/api/v2/[^\"\'\\ ]+)', text)))
+              if paths:
+                  print(f"\n### frontend API routes {resolved}\nstatus={status} bytes={len(body)}")
+                  print(json.dumps(paths[:300], ensure_ascii=False, indent=2))
           PY
