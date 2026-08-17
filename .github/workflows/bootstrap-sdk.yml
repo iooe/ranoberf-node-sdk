@@ -1,46 +1,13 @@
-name: Restore production SDK
+name: Archived SDK restore provenance
 
 on:
-  push:
-    branches:
-      - agent/restore-production-sdk
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  restore:
-    if: ${{ github.actor != 'github-actions[bot]' }}
+  provenance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Restore verified source archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat .bootstrap/ranoberf.part.* | base64 -d > /tmp/ranoberf-sdk.tar.gz
-          echo "edee1ffcd3d24a7a23f0c2e55b32abf6a39b1fef0e7cc3ca763e4778ee8c0823  /tmp/ranoberf-sdk.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/ranoberf-sdk.tar.gz -C .
-
-      - name: Install and run deterministic checks
-        run: |
-          npm ci
-          npm run check
-
-      - name: Run live RanobeRF smoke test
-        run: node test/live-smoke.mjs
-
-      - name: Commit restored SDK source
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf .bootstrap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "feat: restore production RanobeRF SDK"
-          git push origin HEAD:agent/restore-production-sdk
+      - run: echo "The one-time SDK restore completed successfully on 2026-08-17. This workflow is retained only as provenance and performs no repository mutation."
