@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Discover current RanobeRF data routes
+      - name: Probe RanobeRF chapter and v3 contracts
         shell: bash
         run: |
           python3 - <<'PY'
@@ -25,77 +25,118 @@ jobs:
           import urllib.request
 
           BASE = "https://xn--80acm4afj.xn--p1ai"
-          UA = "Mozilla/5.0 (compatible; ranoberf-sdk-contract-probe/2.0)"
+          BOOK = "bezdna-nebes"
+          CHAPTER = "glava-1-vozvraschenie-iz-bezdny-nebes"
+          UA = "Mozilla/5.0 (compatible; ranoberf-sdk-contract-probe/3.0)"
 
-          def fetch(url, accept="*/*"):
+          def fetch(url, accept="application/json,text/html;q=0.9,*/*;q=0.8"):
               request = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept, "Referer": BASE + "/"})
               try:
                   with urllib.request.urlopen(request, timeout=30) as response:
-                      return response.status, response.headers.get("content-type", ""), response.geturl(), response.read(8_000_000)
+                      return response.status, response.headers.get("content-type", ""), response.geturl(), response.read(10_000_000)
               except urllib.error.HTTPError as error:
                   return error.code, error.headers.get("content-type", ""), error.geturl(), error.read(1_000_000)
               except Exception as error:
                   return 0, type(error).__name__, url, str(error).encode()
 
           def shape(value, depth=0):
-              if depth > 6: return type(value).__name__
+              if depth > 7: return type(value).__name__
               if isinstance(value, dict):
-                  return {k: shape(v, depth + 1) for k, v in list(value.items())[:120]}
+                  return {k: shape(v, depth + 1) for k, v in list(value.items())[:160]}
               if isinstance(value, list):
                   return {"type": "list", "length": len(value), "sample": shape(value[0], depth + 1) if value else None}
               if isinstance(value, str):
-                  return {"type": "str", "length": len(value), "sample": value[:180]}
+                  return {"type": "str", "length": len(value), "startsWithTag": value.lstrip().startswith("<"), "sample": value[:240]}
               return value
 
-          def parse_next(text):
-              match = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>([\s\S]*?)</script>', text, re.I)
-              if not match: return None
-              return json.loads(html.unescape(match.group(1)))
+          def probe(label, url):
+              status, content_type, final_url, body = fetch(url)
+              print(f"\n### {label}\nstatus={status} content_type={content_type} final={final_url} bytes={len(body)}")
+              try:
+                  payload = json.loads(body.decode("utf-8-sig"))
+              except Exception:
+                  print(body[:2000].decode("utf-8", "replace"))
+                  return None
+              print(json.dumps(shape(payload), ensure_ascii=False, indent=2)[:80000])
+              return payload
 
-          pages = ["/", "/bezdna-nebes"]
-          collected_scripts = []
-          for path in pages:
-              status, content_type, final_url, body = fetch(BASE + path, "text/html,*/*;q=0.8")
-              text = body.decode("utf-8", "replace")
-              print(f"\n### PAGE {path} status={status} final={final_url} bytes={len(body)}")
-              next_data = parse_next(text)
-              print("NEXT_DATA=", json.dumps(shape(next_data), ensure_ascii=False, indent=2)[:50000])
-              scripts = [urllib.parse.urljoin(final_url, s) for s in re.findall(r'<script[^>]+src=["\']([^"\']+)', text, re.I)]
-              collected_scripts.extend(scripts)
-              print("SCRIPTS=", json.dumps(scripts, ensure_ascii=False, indent=2))
-              print("BOOK_CHAPTER_LINKS=", json.dumps(sorted(set(re.findall(r'href=["\']([^"\']+)', text, re.I)))[:300], ensure_ascii=False, indent=2))
-              if isinstance(next_data, dict):
-                  build_id = next_data.get("buildId")
-                  page = next_data.get("page")
-                  query = next_data.get("query") or {}
-                  if build_id and page:
-                      route = page
-                      for key, value in query.items():
-                          route = route.replace("[" + key + "]", str(value))
-                      if route == "/": data_path = f"/_next/data/{build_id}/index.json"
-                      else: data_path = f"/_next/data/{build_id}{route}.json"
-                      status2, ct2, final2, body2 = fetch(BASE + data_path, "application/json,*/*;q=0.8")
-                      print(f"NEXT_JSON {data_path} status={status2} ct={ct2} final={final2} bytes={len(body2)}")
-                      try:
-                          payload = json.loads(body2.decode("utf-8-sig"))
-                          print(json.dumps(shape(payload), ensure_ascii=False, indent=2)[:50000])
-                      except Exception:
-                          print(body2[:1000].decode("utf-8", "replace"))
+          status, _, _, body = fetch(BASE + "/", "text/html,*/*;q=0.8")
+          home = body.decode("utf-8", "replace")
+          next_match = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>([\s\S]*?)</script>', home, re.I)
+          next_data = json.loads(html.unescape(next_match.group(1))) if next_match else {}
+          build_id = next_data.get("buildId")
+          print("BUILD_ID", build_id)
 
-          for script_url in list(dict.fromkeys(collected_scripts)):
-              if "xn--80acm4afj" not in script_url and script_url.startswith("http"): continue
-              status, content_type, final_url, body = fetch(script_url, "application/javascript,text/javascript,*/*;q=0.8")
+          chapter_page = probe("chapter page Next JSON", f"{BASE}/_next/data/{build_id}/{BOOK}/{CHAPTER}.json")
+          chapter_id = None
+          if isinstance(chapter_page, dict):
+              props = chapter_page.get("pageProps") or {}
+              candidates = [props.get("chapter"), props.get("data"), props]
+              for candidate in candidates:
+                  if isinstance(candidate, dict):
+                      for key in ("id", "chapterId"):
+                          if isinstance(candidate.get(key), int):
+                              chapter_id = candidate[key]
+                              break
+                  if chapter_id: break
+          print("DISCOVERED_CHAPTER_ID", chapter_id)
+
+          page_status, page_ct, page_final, page_body = fetch(f"{BASE}/{BOOK}/{CHAPTER}", "text/html,*/*;q=0.8")
+          page_text = page_body.decode("utf-8", "replace")
+          print(f"\n### chapter HTML page\nstatus={page_status} ct={page_ct} final={page_final} bytes={len(page_body)}")
+          for pattern_name, pattern in [
+              ("content markers", r'.{0,300}(?:chapter-content|content-text|dangerouslySetInnerHTML|translator|Перевод)[\s\S]{0,1800}'),
+              ("images", r'<img[^>]+(?:src|data-src)=["\'][^"\']+["\'][^>]*>'),
+          ]:
+              matches = re.findall(pattern, page_text, re.I)
+              print(pattern_name, json.dumps(matches[:20], ensure_ascii=False)[:30000])
+
+          query = urllib.parse.urlencode({
+              "page": 1,
+              "pageSize": 3,
+              "filter[slug]": BOOK,
+              "expand": "lastChapter,verticalImage,horizontalImage,squareImage,userRating,country,genres,chapters",
+          })
+          probe("v3 books filtered", f"{BASE}/v3/books?{query}")
+          for identifier in ("4270", BOOK):
+              for expand in (
+                  "country,genres,chapters,verticalImage,horizontalImage,squareImage,lastChapter,userRating",
+                  "chapters,images,creator,translator,translators",
+              ):
+                  probe(f"v3 book {identifier} expand={expand}", f"{BASE}/v3/books/{identifier}?expand={urllib.parse.quote(expand)}")
+
+          if chapter_id:
+              for path in [
+                  f"/v3/chapters/{chapter_id}?expand=book,creator,user,translator,translators,images",
+                  f"/v3/chapters?filter%5Bid%5D={chapter_id}&expand=book,creator,user,translator,translators,images",
+                  f"/v3/books/4270/chapters/{chapter_id}?expand=creator,user,translator,translators,images",
+              ]:
+                  probe(f"candidate {path}", BASE + path)
+
+          manifest_url = f"{BASE}/_next/static/{build_id}/_buildManifest.js"
+          _, _, _, manifest_body = fetch(manifest_url, "application/javascript,*/*;q=0.8")
+          manifest = manifest_body.decode("utf-8", "replace")
+          assets = sorted(set(re.findall(r'[^"\']+\.js', manifest)))
+          page_assets = [a for a in assets if "[book]" in a or "%5Bbook%5D" in a or "564-" in a or "443-" in a]
+          page_assets.extend([
+              "static/chunks/pages/[book]/[chapter]-25388ecd2cb6f55e.js",
+              "static/chunks/564-5f03afa30c094fef.js",
+              "static/chunks/443-014d54b0c4eb5204.js",
+              "static/chunks/pages/_app-a695cef4c6f6ea33.js",
+          ])
+          for asset in dict.fromkeys(page_assets):
+              asset_url = urllib.parse.urljoin(f"{BASE}/_next/", asset)
+              status, _, final_url, body = fetch(asset_url, "application/javascript,*/*;q=0.8")
               text = body.decode("utf-8", "replace")
-              absolute_urls = sorted(set(html.unescape(v) for v in re.findall(r'https?://[^"\'`\\\s)]+', text)))
-              route_literals = sorted(set(re.findall(r'["\'](/(?:api|_next/data|books?|chapters?|catalog|search)[^"\'`\\\s]*)', text, re.I)))
-              api_contexts = []
-              for match in re.finditer(r'(?i)(?:baseURL|api|graphql|chapter|book)', text):
-                  snippet = text[max(0, match.start()-180):min(len(text), match.end()+350)]
-                  if snippet not in api_contexts: api_contexts.append(snippet)
-                  if len(api_contexts) >= 30: break
-              if absolute_urls or route_literals or api_contexts:
-                  print(f"\n### SCRIPT {final_url} status={status} bytes={len(body)}")
-                  print("ABSOLUTE_URLS=", json.dumps(absolute_urls[:300], ensure_ascii=False, indent=2))
-                  print("ROUTES=", json.dumps(route_literals[:500], ensure_ascii=False, indent=2))
-                  print("CONTEXTS=", json.dumps(api_contexts, ensure_ascii=False, indent=2)[:50000])
+              print(f"\n### JS {final_url} status={status} bytes={len(body)}")
+              for module_id in ("5902", "3764"):
+                  match = re.search(rf'{module_id}:function\([^)]*\)\{{[\s\S]*?(?=\}},\d+:function|\}}\]\);?$)', text)
+                  if match:
+                      print(f"MODULE {module_id}", match.group(0)[:60000])
+              contexts = []
+              for match in re.finditer(r'(?i)(?:/v3/|chapterContent|contentHtml|translator|translation|rawHtml|textHtml)', text):
+                  snippet = text[max(0, match.start()-500):min(len(text), match.end()+1000)]
+                  if snippet not in contexts: contexts.append(snippet)
+                  if len(contexts) >= 50: break
+              print("CONTEXTS", json.dumps(contexts, ensure_ascii=False, indent=2)[:80000])
           PY
