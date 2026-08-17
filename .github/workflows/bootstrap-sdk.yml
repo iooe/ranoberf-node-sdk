@@ -1,0 +1,13 @@
+name: Archived SDK restore provenance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "The one-time SDK restore completed successfully on 2026-08-17. This workflow is retained only as provenance and performs no repository mutation."
