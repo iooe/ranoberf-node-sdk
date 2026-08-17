@@ -1,0 +1,120 @@
+name: Probe source APIs
+
+on:
+  push:
+    branches:
+      - agent/source-api-sdk
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe public source contracts
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          UA = "Mozilla/5.0 (compatible; source-contract-probe/1.0)"
+
+          def fetch(url):
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": UA,
+                  "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+                  "Referer": urllib.parse.urljoin(url, "/"),
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      body = response.read(2_000_000)
+                      return response.status, response.headers.get("content-type", ""), response.geturl(), body
+              except urllib.error.HTTPError as error:
+                  return error.code, error.headers.get("content-type", ""), error.geturl(), error.read(200_000)
+              except Exception as error:
+                  return 0, type(error).__name__, url, str(error).encode()
+
+          def shape(value, depth=0):
+              if depth > 4:
+                  return type(value).__name__
+              if isinstance(value, dict):
+                  result = {}
+                  for key, child in list(value.items())[:80]:
+                      lower = key.lower()
+                      if lower in {"text", "content", "html", "body", "description", "summary"} and isinstance(child, str):
+                          result[key] = {"type": "str", "length": len(child), "starts_with_tag": child.lstrip().startswith("<")}
+                      else:
+                          result[key] = shape(child, depth + 1)
+                  return result
+              if isinstance(value, list):
+                  return {"type": "list", "length": len(value), "sample": shape(value[0], depth + 1) if value else None}
+              if isinstance(value, str):
+                  return {"type": "str", "length": len(value), "sample": value[:100]}
+              return value
+
+          def probe_json(label, url):
+              status, content_type, final_url, body = fetch(url)
+              print(f"\n### {label}\nstatus={status} content_type={content_type} final={final_url} bytes={len(body)}")
+              try:
+                  payload = json.loads(body.decode("utf-8-sig"))
+              except Exception:
+                  print(body[:500].decode("utf-8", "replace"))
+                  return None
+              print(json.dumps(shape(payload), ensure_ascii=False, indent=2)[:30000])
+              return payload
+
+          base = "https://xn--80ac9aeh6f.xn--p1ai"
+          book = probe_json("ranoberf book", f"{base}/api/v2/books/povelitely")
+          chapters = probe_json("ranoberf chapters", f"{base}/api/v2/books/povelitely/chapters")
+          if isinstance(chapters, dict):
+              items = chapters.get("items") or chapters.get("data") or []
+          elif isinstance(chapters, list):
+              items = chapters
+          else:
+              items = []
+          if items:
+              free = next((item for item in items if isinstance(item, dict) and (item.get("hasUserPaid") or item.get("availabilityStatus") == "free")), items[0])
+              slug = free.get("slug") if isinstance(free, dict) else None
+              if slug:
+                  probe_json("ranoberf chapter", f"{base}/api/v2/books/povelitely/chapters/{urllib.parse.quote(str(slug))}")
+
+          for path in [
+              "/api/v2/books",
+              "/api/v2/books/",
+              "/api/v2/books?page=1",
+              "/api/v2/books?limit=3",
+              "/api/v2/books/catalog?page=1",
+              "/api/v2/catalog/books?page=1",
+          ]:
+              probe_json(f"ranoberf catalog candidate {path}", base + path)
+
+          def probe_html(label, url):
+              status, content_type, final_url, body = fetch(url)
+              text = body.decode("utf-8", "replace")
+              print(f"\n### {label}\nstatus={status} content_type={content_type} final={final_url} bytes={len(body)}")
+              scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)', text, re.I)
+              forms = re.findall(r'<form[^>]+action=["\']([^"\']*)', text, re.I)
+              ids = sorted(set(re.findall(r'\bid=["\']([^"\']+)', text, re.I)))
+              classes = sorted(set(c for raw in re.findall(r'\bclass=["\']([^"\']+)', text, re.I) for c in raw.split()))
+              book_links = sorted(set(re.findall(r'href=["\']([^"\']*?/book/[^"\']+)', text, re.I)))[:30]
+              print(json.dumps({
+                  "scripts": scripts[:30],
+                  "forms": forms[:30],
+                  "ids": ids[:100],
+                  "classes": classes[:180],
+                  "book_links": book_links,
+                  "has_chapters": "Chapters" in text,
+                  "has_content_text": "content-text" in text,
+              }, ensure_ascii=False, indent=2))
+              return text
+
+          rulate_book = probe_html("rulate book", "https://tl.rulate.ru/book/201009")
+          probe_json("rulate chapter ajax", "https://tl.rulate.ru/book/201009/25027920/ajax?is_new=true")
+          probe_html("rulate search", "https://tl.rulate.ru/search")
+          PY
