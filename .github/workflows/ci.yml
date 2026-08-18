@@ -26,3 +26,31 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+
+  catalog-diagnostic:
+    if: github.head_ref == 'catalog-crawl-2026-08-18'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build RanobeRF SDK
+        run: npm ci && npm run build
+      - name: Build Rulate SDK
+        run: |
+          git clone --depth 1 https://github.com/iooe/rulate-node-sdk.git ../rulate-node-sdk
+          cd ../rulate-node-sdk
+          npm ci
+          npm run build
+      - name: Run diagnostics
+        run: node scripts/catalog-diagnostic.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: catalog-diagnostic
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3
