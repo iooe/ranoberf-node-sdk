@@ -27,10 +27,10 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  catalog-diagnostic:
+  catalog-export:
     if: github.head_ref == 'catalog-crawl-2026-08-18'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,12 +45,12 @@ jobs:
           cd ../rulate-node-sdk
           npm ci
           npm run build
-      - name: Run diagnostics
-        run: node scripts/catalog-diagnostic.mjs
+      - name: Export complete catalogs
+        run: node scripts/build-catalogs.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: catalog-diagnostic
+          name: complete-book-catalogs
           path: out/
           if-no-files-found: warn
           retention-days: 3
