@@ -3,7 +3,14 @@ import { RanobeRfClient } from "../dist/index.js";
 
 const OUTPUT_DIR = "out";
 const MIN_CHAPTERS = 8;
-const LEGACY_BASE_URL = "https://xn--80ac9aeh6f.xn--p1ai";
+const MANUAL_LOWER_BOUNDS = new Map([
+  ["vechnaya-volya", 1216],
+  ["magistr-dyyavolyskogo-kulyta", 113],
+]);
+const KNOWN_ORIGINAL_SLUGS = new Map([
+  ["hroniki-aksiona-zvezdnyy-flot-izgoev", "Локальное авторское произведение: «Хроники Аксиона»"],
+]);
+
 await mkdir(OUTPUT_DIR, { recursive: true });
 
 function sleep(ms) {
@@ -51,17 +58,28 @@ function originalReason(book) {
     return `Страна произведения: ${book.country?.title || book.country?.code}`;
   }
   const genreText = normalized(book.genres.map((genre) => genre.title).join(" "));
-  if (/авторск|оригинальн(?:ое|ая)\s+произвед/.test(genreText)) return "Жанр/тип помечен как авторское произведение";
+  if (/авторск|оригинальн(?:ое|ая)\s+произвед/.test(genreText)) {
+    return "Жанр/тип помечен как авторское произведение";
+  }
   const flag = explicitBooleanFlag(book.raw, [
-    "isAuthorWork", "isAuthorBook", "isOriginalWork", "isUserOriginal", "authorWork", "originalWork",
+    "isAuthorWork",
+    "isAuthorBook",
+    "isOriginalWork",
+    "isUserOriginal",
+    "authorWork",
+    "originalWork",
   ]);
   if (flag) return `Явный флаг ${flag}=true`;
   const info = normalized(`${stripHtml(book.additionalInfoHtml)} ${stripHtml(book.importantInfoHtml)}`);
-  if (/авторское\s+произведение|оригинальное\s+произведение\s+пользователя/.test(info)) return "Явная пометка в информации книги";
+  if (/авторское\s+произведение|оригинальное\s+произведение\s+пользователя/.test(info)) {
+    return "Явная пометка в информации книги";
+  }
   const typeValue = book.raw && typeof book.raw === "object" && !Array.isArray(book.raw)
     ? [book.raw.type, book.raw.bookType, book.raw.originType, book.raw.categoryType].filter(Boolean).join(" ")
     : "";
-  if (/авторск|user[-_ ]?original|author[-_ ]?work/i.test(asText(typeValue))) return `Тип книги: ${typeValue}`;
+  if (/авторск|user[-_ ]?original|author[-_ ]?work/i.test(asText(typeValue))) {
+    return `Тип книги: ${typeValue}`;
+  }
   return null;
 }
 
@@ -80,7 +98,7 @@ function fallbackChapterCount(summary) {
   return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null;
 }
 
-const commonOptions = {
+const client = new RanobeRfClient({
   maxConcurrency: 12,
   minRequestIntervalMs: 90,
   timeoutMs: 60_000,
@@ -89,12 +107,7 @@ const commonOptions = {
   retryBaseDelayMs: 500,
   retryMaxDelayMs: 30_000,
   cache: false,
-};
-const client = new RanobeRfClient({ ...commonOptions, userAgent: "catalog-audit-ranoberf/2026-08-18" });
-const legacyClient = new RanobeRfClient({
-  ...commonOptions,
-  baseUrl: LEGACY_BASE_URL,
-  userAgent: "catalog-audit-ranoberf-legacy-recovery/2026-08-18",
+  userAgent: "catalog-audit-ranoberf/2026-08-18",
 });
 
 const catalog = await client.listCatalog({ page: 1, pageSize: 10_000, source: "v3" });
@@ -105,54 +118,41 @@ if (catalog.pageInfo.totalCount !== null && catalog.items.length !== catalog.pag
 const countryCounts = new Map();
 const rows = await mapLimit(catalog.items, 12, async (summary, index) => {
   let book = null;
-  let targetError = null;
-  let legacyError = null;
-  let recoveredFromLegacy = false;
-
+  let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       book = await client.getBook(summary.slug);
       break;
     } catch (error) {
-      targetError = error;
+      lastError = error;
       if (isNotFound(error)) break;
       if (attempt < 3) await sleep(attempt * 1_500 + Math.round(Math.random() * 500));
     }
   }
 
-  if (!book && isNotFound(targetError)) {
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        book = await legacyClient.getBook(summary.slug);
-        recoveredFromLegacy = true;
-        break;
-      } catch (error) {
-        legacyError = error;
-        if (isNotFound(error)) break;
-        if (attempt < 2) await sleep(attempt * 1_500);
-      }
-    }
-  }
-
+  let row;
   if (!book) {
-    if (targetError && !isNotFound(targetError)) throw targetError;
-    if (legacyError && !isNotFound(legacyError)) throw legacyError;
-    const fallbackCount = fallbackChapterCount(summary);
-    return {
+    const catalogCount = fallbackChapterCount(summary);
+    const lowerBound = MANUAL_LOWER_BOUNDS.get(summary.slug) ?? null;
+    const chapterCount = catalogCount ?? lowerBound;
+    const isLowerBound = catalogCount === null && lowerBound !== null;
+    row = {
       source: "RanobeRF",
       id: summary.id,
       slug: summary.slug,
       url: summary.url,
-      alternateUrl: "",
       title: summary.title,
       titleEn: summary.titleEn ?? "",
       descriptionHtml: summary.descriptionHtml ?? "",
       fullTitle: "",
       fullTitleEn: "",
-      chapterCount: fallbackCount,
-      chapterCountMethod: fallbackCount === null
-        ? "Не удалось восстановить: обе карточки возвращают 404, последняя глава в каталоге отсутствует"
-        : "Номер последней главы из каталога; обе карточки возвращают 404",
+      chapterCount,
+      chapterCountIsLowerBound: isLowerBound,
+      chapterCountMethod: catalogCount !== null
+        ? "Номер последней главы из каталога; карточка книги недоступна"
+        : isLowerBound
+          ? "Подтверждённая нижняя граница по существующей странице главы; карточка книги недоступна"
+          : "Число глав не восстановлено; запись исключается как авторская или остаётся в аудите",
       author: "",
       country: "",
       countryCode: "",
@@ -166,62 +166,55 @@ const rows = await mapLimit(catalog.items, 12, async (summary, index) => {
       lastChapterNumber: summary.lastChapter?.number,
       lastChapterPublishedAt: summary.lastChapter?.publishedAt ?? "",
       posterUrl: summary.images.find((image) => image.kind === "vertical")?.url ?? summary.images[0]?.url ?? "",
-      originalReason: summary.slug === "hroniki-aksiona-zvezdnyy-flot-izgoev"
-        ? "Локальное авторское произведение: «Хроники Аксиона»"
-        : null,
-      unavailableReason: "Карточка книги возвращает 404 на основном и параллельном доменах",
+      originalReason: KNOWN_ORIGINAL_SLUGS.get(summary.slug) ?? null,
+      unavailableReason: isNotFound(lastError)
+        ? "Карточка книги возвращает 404"
+        : `Карточка книги недоступна: ${String(lastError?.message ?? lastError ?? "неизвестная ошибка")}`,
+      catalogRaw: summary.raw,
+    };
+  } else {
+    const countryKey = `${book.country?.code ?? ""}|${book.country?.title ?? "Не указана"}`;
+    countryCounts.set(countryKey, (countryCounts.get(countryKey) ?? 0) + 1);
+    row = {
+      source: "RanobeRF",
+      id: book.id,
+      slug: book.slug,
+      url: book.url,
+      title: book.title,
+      titleEn: book.titleEn ?? "",
+      descriptionHtml: book.descriptionHtml ?? "",
+      fullTitle: book.fullTitle ?? "",
+      fullTitleEn: book.fullTitleEn ?? "",
+      chapterCount: book.chapters.length,
+      chapterCountIsLowerBound: false,
+      chapterCountMethod: "Точный размер массива chapters в карточке книги",
+      author: book.author ?? "",
+      country: book.country?.title ?? "",
+      countryCode: book.country?.code ?? "",
+      genres: book.genres.map((genre) => genre.title),
+      status: book.status ?? "",
+      views: book.views,
+      likes: book.likes,
+      dislikes: book.dislikes,
+      chapterCost: book.chapterCost,
+      lastChapterTitle: book.lastChapter?.title ?? "",
+      lastChapterNumber: book.lastChapter?.number,
+      lastChapterPublishedAt: book.lastChapter?.publishedAt ?? "",
+      posterUrl: book.images.find((image) => image.kind === "vertical")?.url ?? book.images[0]?.url ?? "",
+      originalReason: originalReason(book) ?? KNOWN_ORIGINAL_SLUGS.get(book.slug) ?? null,
+      unavailableReason: "",
       catalogRaw: summary.raw,
     };
   }
 
-  const countryKey = `${book.country?.code ?? ""}|${book.country?.title ?? "Не указана"}`;
-  countryCounts.set(countryKey, (countryCounts.get(countryKey) ?? 0) + 1);
-  const row = {
-    source: "RanobeRF",
-    id: book.id,
-    slug: summary.slug,
-    url: recoveredFromLegacy ? summary.url : book.url,
-    alternateUrl: recoveredFromLegacy ? book.url : "",
-    title: book.title,
-    titleEn: book.titleEn ?? "",
-    descriptionHtml: book.descriptionHtml ?? summary.descriptionHtml ?? "",
-    fullTitle: book.fullTitle ?? "",
-    fullTitleEn: book.fullTitleEn ?? "",
-    chapterCount: book.chapters.length,
-    chapterCountMethod: recoveredFromLegacy
-      ? "Точный размер массива chapters на параллельном домене ранобэ.рф; основная карточка ранобе.рф возвращает 404"
-      : "Точный размер массива chapters в карточке книги",
-    author: book.author ?? "",
-    country: book.country?.title ?? "",
-    countryCode: book.country?.code ?? "",
-    genres: book.genres.map((genre) => genre.title),
-    status: book.status ?? summary.status ?? "",
-    views: book.views,
-    likes: book.likes,
-    dislikes: book.dislikes,
-    chapterCost: book.chapterCost,
-    lastChapterTitle: book.lastChapter?.title ?? summary.lastChapter?.title ?? "",
-    lastChapterNumber: book.lastChapter?.number ?? summary.lastChapter?.number,
-    lastChapterPublishedAt: book.lastChapter?.publishedAt ?? summary.lastChapter?.publishedAt ?? "",
-    posterUrl: book.images.find((image) => image.kind === "vertical")?.url ?? book.images[0]?.url ?? "",
-    originalReason: originalReason(book),
-    unavailableReason: recoveredFromLegacy
-      ? "Основная карточка ранобе.рф возвращает 404; данные восстановлены с параллельного домена ранобэ.рф"
-      : "",
-    catalogRaw: summary.raw,
-  };
-  if (summary.slug === "hroniki-aksiona-zvezdnyy-flot-izgoev" && !row.originalReason) {
-    row.originalReason = "Локальное авторское произведение: «Хроники Аксиона»";
-  }
   if ((index + 1) % 100 === 0 || index + 1 === catalog.items.length) {
     console.log(`[RanobeRF] ${index + 1}/${catalog.items.length} catalog rows resolved.`);
   }
   return row;
 });
 
-const unresolved = rows.filter((row) => !Number.isFinite(row.chapterCount));
-const recovered = rows.filter((row) => row.alternateUrl);
-const unavailable = rows.filter((row) => row.unavailableReason && !row.alternateUrl);
+const unresolved = rows.filter((row) => !Number.isFinite(row.chapterCount) && !row.originalReason);
+const unavailable = rows.filter((row) => row.unavailableReason);
 const report = {
   generatedAt: new Date().toISOString(),
   minimumChapters: MIN_CHAPTERS,
@@ -229,22 +222,20 @@ const report = {
   catalogTotalCount: catalog.pageInfo.totalCount,
   catalogRowsFetched: catalog.items.length,
   resolvedBookDetails: rows.length - unavailable.length,
-  recoveredFromLegacyDomain: recovered.map((row) => ({
-    slug: row.slug,
-    id: row.id,
-    title: row.title,
-    chapterCount: row.chapterCount,
-    alternateUrl: row.alternateUrl,
-    originalReason: row.originalReason,
-  })),
   unavailableBookCards: unavailable.map((row) => ({
     slug: row.slug,
     id: row.id,
     title: row.title,
     chapterCount: row.chapterCount,
+    chapterCountIsLowerBound: row.chapterCountIsLowerBound,
     originalReason: row.originalReason,
+    unavailableReason: row.unavailableReason,
   })),
-  unresolvedChapterCounts: unresolved.map((row) => ({ slug: row.slug, id: row.id, title: row.title })),
+  unresolvedNonOriginalChapterCounts: unresolved.map((row) => ({
+    slug: row.slug,
+    id: row.id,
+    title: row.title,
+  })),
   countryDistribution: Object.fromEntries([...countryCounts.entries()].sort(([a], [b]) => a.localeCompare(b))),
   authorOriginalCandidates: rows.filter((row) => row.originalReason).length,
   underMinimum: rows.filter((row) => !row.originalReason && Number.isFinite(row.chapterCount) && row.chapterCount < MIN_CHAPTERS).length,
@@ -256,3 +247,7 @@ await Promise.all([
   writeFile(`${OUTPUT_DIR}/ranoberf_report.json`, JSON.stringify(report, null, 2)),
 ]);
 console.log(JSON.stringify(report, null, 2));
+
+if (unresolved.length > 0) {
+  throw new Error(`${unresolved.length} non-original RanobeRF rows still have no usable chapter count.`);
+}
