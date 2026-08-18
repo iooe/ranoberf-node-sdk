@@ -27,10 +27,44 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  catalog-export:
+  rulate-shards:
     if: github.head_ref == 'catalog-crawl-2026-08-18'
+    name: Rulate shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Rulate SDK
+        run: |
+          git clone --depth 1 https://github.com/iooe/rulate-node-sdk.git ../rulate-node-sdk
+          cd ../rulate-node-sdk
+          npm ci
+          npm run build
+      - name: Export assigned Rulate pages
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: 4
+        run: node scripts/export-rulate-shard.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rulate-shard-${{ matrix.shard }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3
+
+  ranoberf-export:
+    if: github.head_ref == 'catalog-crawl-2026-08-18'
+    name: RanobeRF catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,77 +73,12 @@ jobs:
           cache: npm
       - name: Build RanobeRF SDK
         run: npm ci && npm run build
-      - name: Build Rulate SDK
-        run: |
-          git clone --depth 1 https://github.com/iooe/rulate-node-sdk.git ../rulate-node-sdk
-          cd ../rulate-node-sdk
-          npm ci
-          npm run build
-      - name: Detach parsed strings from source HTML
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p = Path("scripts/build-catalogs.mjs")
-          s = p.read_text()
-          needle = '''function asText(value) {
-            return value === null || value === undefined ? "" : String(value);
-          }
-          '''
-          replacement = '''function asText(value) {
-            return value === null || value === undefined ? "" : String(value);
-          }
-
-          // Force independent strings so V8 does not retain every multi-megabyte HTML page.
-          function detachedString(value) {
-            const text = asText(value);
-            return text === "" ? "" : Buffer.from(text, "utf8").toString("utf8");
-          }
-
-          function detachedStrings(values) {
-            return values.map(detachedString);
-          }
-          '''
-          if needle not in s:
-              raise SystemExit("asText insertion point not found")
-          s = s.replace(needle, replacement)
-          s = s.replace('''      url: item.url,
-                title: item.title,
-                originalTitle: item.originalTitle ?? "",
-          ''', '''      url: detachedString(item.url),
-                title: detachedString(item.title),
-                originalTitle: detachedString(item.originalTitle),
-          ''')
-          s = s.replace('''      catalogSections: [section.name],
-                leafCategories: leafCategory ? [leafCategory] : [],
-                genres: item.genres,
-                tags: item.tags,
-                status: item.status ?? "",
-                lastActivityAt: item.lastActivityAt ?? "",
-          ''', '''      catalogSections: [detachedString(section.name)],
-                leafCategories: leafCategory ? [detachedString(leafCategory)] : [],
-                genres: detachedStrings(item.genres),
-                tags: detachedStrings(item.tags),
-                status: detachedString(item.status),
-                lastActivityAt: detachedString(item.lastActivityAt),
-          ''')
-          s = s.replace('''      translator: item.translator?.name ?? "",
-                posterUrl: item.poster?.url ?? "",
-          ''', '''      translator: detachedString(item.translator?.name),
-                posterUrl: detachedString(item.poster?.url),
-          ''')
-          s = s.replace('''      console.log(`[Rulate] ${section.name}: ${completed}/${totalPages} pages; ${rawItems} raw rows.`);
-          ''', '''      const heapMb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-                console.log(`[Rulate] ${section.name}: ${completed}/${totalPages} pages; ${rawItems} raw rows; heap ${heapMb} MB.`);
-          ''')
-          p.write_text(s)
-          PY
-          node --check scripts/build-catalogs.mjs
-      - name: Export complete catalogs
-        run: node scripts/build-catalogs.mjs
+      - name: Export complete RanobeRF catalog
+        run: node scripts/export-ranoberf-only.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: complete-book-catalogs
+          name: ranoberf-export
           path: out/
           if-no-files-found: warn
           retention-days: 3
