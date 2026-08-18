@@ -1,0 +1,31 @@
+name: RanobeRF recovery export
+
+on:
+  push:
+    branches:
+      - catalog-rf-recovery-2026-08-18
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build SDK
+        run: npm ci && npm run build
+      - name: Export catalog with stale-card recovery
+        run: node scripts/export-ranoberf-only.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ranoberf-recovered
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3

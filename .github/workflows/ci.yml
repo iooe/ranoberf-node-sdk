@@ -26,3 +26,82 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+
+  rulate-shards:
+    if: github.head_ref == 'catalog-crawl-2026-08-18'
+    name: Rulate shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Rulate SDK
+        run: |
+          git clone --depth 1 https://github.com/iooe/rulate-node-sdk.git ../rulate-node-sdk
+          cd ../rulate-node-sdk
+          npm ci
+          npm run build
+      - name: Export assigned Rulate pages
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: 4
+        run: node scripts/export-rulate-shard.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rulate-shard-${{ matrix.shard }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3
+
+  ranoberf-export:
+    if: github.head_ref == 'catalog-crawl-2026-08-18'
+    name: RanobeRF catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build RanobeRF SDK
+        run: npm ci && npm run build
+      - name: Export complete RanobeRF catalog
+        run: node scripts/export-ranoberf-only.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ranoberf-export
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3
+
+  ranoberf-recovery:
+    if: github.head_ref == 'catalog-rf-recovery-2026-08-18'
+    name: RanobeRF recovered catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build RanobeRF SDK
+        run: npm ci && npm run build
+      - name: Export catalog with stale-card recovery
+        run: node scripts/export-ranoberf-only.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ranoberf-recovered
+          path: out/
+          if-no-files-found: warn
+          retention-days: 3
